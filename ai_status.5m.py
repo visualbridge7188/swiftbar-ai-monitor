@@ -97,6 +97,8 @@ def format_time(seconds):
         return f"{seconds}s"
 
 def get_codex_data():
+    MAX_FILE_AGE_SECONDS = 86400  # Only consider files modified within 24 hours
+
     try:
         sessions_dir = os.path.expanduser("~/.codex/sessions")
         if not os.path.exists(sessions_dir):
@@ -107,23 +109,38 @@ def get_codex_data():
         if not files:
             raise Exception("No active session files found")
             
-        # Sort files by modification time
+        # Sort files by modification time (newest first)
         files.sort(key=os.path.getmtime, reverse=True)
-        newest_file = files[0]
-            
+        now = time.time()
+
+        # Scan multiple files (not just the newest) to find valid rate_limits.
+        # The newest file may have primary=null, secondary=null (e.g. limit_id="premium").
         rate_limits = None
-        with open(newest_file, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-            for line in reversed(lines):
-                try:
-                    obj = json.loads(line)
-                    if "payload" in obj and "rate_limits" in obj["payload"]:
-                        rl = obj["payload"]["rate_limits"]
-                        if rl and rl.get("primary") and rl.get("secondary"):
-                            rate_limits = rl
-                            break
-                except Exception:
-                    continue
+        source_file = None
+        for fpath in files:
+            # Skip files older than 24 hours
+            if now - os.path.getmtime(fpath) > MAX_FILE_AGE_SECONDS:
+                break
+
+            try:
+                with open(fpath, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+                for line in reversed(lines):
+                    try:
+                        obj = json.loads(line)
+                        if "payload" in obj and "rate_limits" in obj["payload"]:
+                            rl = obj["payload"]["rate_limits"]
+                            # Accept entries with valid primary AND secondary
+                            if rl and rl.get("primary") and rl.get("secondary"):
+                                rate_limits = rl
+                                source_file = fpath
+                                break
+                    except Exception:
+                        continue
+                if rate_limits:
+                    break
+            except Exception:
+                continue
                     
         if not rate_limits:
             raise Exception("No rate limit data found in recent sessions")
@@ -134,7 +151,6 @@ def get_codex_data():
         remaining_p = max(0.0, 100.0 - primary.get("used_percent", 0.0))
         remaining_s = max(0.0, 100.0 - secondary.get("used_percent", 0.0))
         
-        now = time.time()
         reset_p = max(0, int(primary.get("resets_at", 0) - now))
         reset_s = max(0, int(secondary.get("resets_at", 0) - now))
         
@@ -149,6 +165,11 @@ def get_codex_data():
             expected_7d = max(0.0, min(100.0, 100.0 - expected_used))
             
         alert = (remaining_p < 10) or (remaining_s < 10)
+
+        # Determine if data is stale (source file is not the newest)
+        newest_file = files[0]
+        is_stale = (source_file != newest_file)
+        error_msg = "(Stale Data)" if is_stale else None
         
         return {
             "percent_5h": int(remaining_p),
@@ -157,19 +178,19 @@ def get_codex_data():
             "reset_7d": format_time(reset_s),
             "expected_7d": expected_7d,
             "alert": alert,
-            "error": None,
+            "error": error_msg,
             "mocked": False
         }
     except Exception:
         # Keep error clean and short
         return {
-            "percent_5h": 45,
-            "percent_7d": 42,
-            "reset_5h": "12m 30s",
-            "reset_7d": "1d 22h",
-            "expected_7d": 50.0,
+            "percent_5h": -1,
+            "percent_7d": -1,
+            "reset_5h": "N/A",
+            "reset_7d": "N/A",
+            "expected_7d": None,
             "alert": False,
-            "error": "(Simulated Quota)",
+            "error": "(No Data)",
             "mocked": True
         }
 
@@ -342,14 +363,20 @@ def parse_antigravity_models(res):
         cfgs.sort(key=sort_key)
         best = cfgs[0]
         quota = best.get("quotaInfo", {})
-        rem = quota.get("remainingFraction", 1.0)
-        percent = int(max(0.0, min(100.0, rem * 100.0)))
+        rem = quota.get("remainingFraction")
+        if rem is not None:
+            percent = int(max(0.0, min(100.0, rem * 100.0)))
+            has_quota = True
+        else:
+            percent = None
+            has_quota = False
         reset_str = quota.get("resetTime")
         reset_seconds = max(0, int(_parse_iso8601(reset_str) - time.time())) if reset_str else 0
         
         models[family] = {
             "label": best.get("label"),
             "percent": percent,
+            "has_quota": has_quota,
             "reset": format_time(reset_seconds) if reset_seconds > 0 else "N/A"
         }
     return models
@@ -362,11 +389,34 @@ def get_antigravity_data():
             for port in ports:
                 res = query_antigravity_status(port, token)
                 models = parse_antigravity_models(res)
+                # Extract credits from API response
+                credits = None
+                if res and "userStatus" in res:
+                    plan = res["userStatus"].get("planStatus", {})
+                    pi = plan.get("planInfo", {})
+                    prompt_avail = plan.get("availablePromptCredits")
+                    prompt_total = pi.get("monthlyPromptCredits")
+                    flow_avail = plan.get("availableFlowCredits")
+                    flow_total = pi.get("monthlyFlowCredits")
+                    if prompt_avail is not None or flow_avail is not None:
+                        credits = {
+                            "prompt_available": prompt_avail or 0,
+                            "prompt_total": prompt_total or 0,
+                            "flow_available": flow_avail or 0,
+                            "flow_total": flow_total or 0,
+                        }
                 if models and any(models.values()):
-                    alert = any(m["percent"] < 10 for m in models.values() if m)
+                    model_alert = any(m["percent"] < 10 for m in models.values() if m and m.get("percent") is not None)
+                    credit_alert = False
+                    if credits:
+                        if credits["prompt_total"] > 0:
+                            credit_alert = (credits["prompt_available"] / credits["prompt_total"] * 100) < 10
+                        if credits["flow_total"] > 0:
+                            credit_alert = credit_alert or (credits["flow_available"] / credits["flow_total"] * 100) < 10
                     return {
                         "models": models,
-                        "alert": alert,
+                        "credits": credits,
+                        "alert": model_alert or credit_alert,
                         "error": None,
                         "mocked": False
                     }
@@ -497,7 +547,11 @@ def render_ui(codex, ag, zai):
     print("---")
     
     # Dropdown Details
-    if HAS_PIL:
+    if codex['mocked'] and codex['percent_5h'] < 0:
+        # No session data at all - show minimal status
+        print("🤖 Codex Status:")
+        print(f"   • No session data available")
+    elif HAS_PIL:
         bar_cx_5h = generate_progress_bar_image(codex['percent_5h'])
         bar_cx_7d = generate_progress_bar_image(codex['percent_7d'], codex.get('expected_7d'))
         
@@ -507,8 +561,8 @@ def render_ui(codex, ag, zai):
         print(f"   • 7-Day Limit : {codex['percent_7d']}% remaining (Reset: {codex['reset_7d']})")
         print(f"     | image={bar_cx_7d} disabled=true")
     else:
-        bar_5h = get_bar_text(codex['percent_5h'])
-        bar_7d = get_bar_text(codex['percent_7d'])
+        bar_5h = get_bar_text(max(0, codex['percent_5h']))
+        bar_7d = get_bar_text(max(0, codex['percent_7d']))
         print("🤖 Codex Status:")
         print(f"   • 5-Hour Limit: [{bar_5h}] {codex['percent_5h']}% remaining (Reset: {codex['reset_5h']})")
         print(f"   • 7-Day Limit : [{bar_7d}] {codex['percent_7d']}% remaining (Reset: {codex['reset_7d']})")
@@ -518,6 +572,21 @@ def render_ui(codex, ag, zai):
     print("---")
     
     print("🚀 Antigravity Status:")
+    ag_credits = ag.get("credits")
+    if ag_credits:
+        prompt_pct = round(ag_credits["prompt_available"] / ag_credits["prompt_total"] * 100) if ag_credits["prompt_total"] > 0 else 0
+        flow_pct = round(ag_credits["flow_available"] / ag_credits["flow_total"] * 100) if ag_credits["flow_total"] > 0 else 0
+        if HAS_PIL:
+            bar_prompt = generate_progress_bar_image(prompt_pct)
+            bar_flow = generate_progress_bar_image(flow_pct)
+            print(f"   • Prompt Credits: {ag_credits['prompt_available']:,}/{ag_credits['prompt_total']:,} ({prompt_pct}%)")
+            print(f"     | image={bar_prompt} disabled=true")
+            print(f"   • Flow Credits  : {ag_credits['flow_available']:,}/{ag_credits['flow_total']:,} ({flow_pct}%)")
+            print(f"     | image={bar_flow} disabled=true")
+        else:
+            print(f"   • Prompt Credits: {ag_credits['prompt_available']:,}/{ag_credits['prompt_total']:,} ({prompt_pct}%)")
+            print(f"   • Flow Credits  : {ag_credits['flow_available']:,}/{ag_credits['flow_total']:,} ({flow_pct}%)")
+        print("   ─── Model Quotas ───")
     ag_models = ag.get("models", {})
     for family, key in [("Claude", "claude"), ("Gemini Pro", "gemini_pro"), ("Gemini Flash", "gemini_flash")]:
         model = ag_models.get(key)
@@ -525,13 +594,25 @@ def render_ui(codex, ag, zai):
             lbl = model["label"]
             pct = model["percent"]
             rst = model["reset"]
+            has_quota = model.get("has_quota", True)
+            if pct is not None:
+                pct_display = f"{pct}%"
+                bar_val = pct
+            elif has_quota is False:
+                pct_display = "Shared Pool ↗"
+                bar_val = 0
+            else:
+                pct_display = "N/A"
+                bar_val = 0
             if HAS_PIL:
-                bar_img = generate_progress_bar_image(pct)
-                print(f"   • {family} ({lbl}): {pct}% remaining (Reset: {rst})")
+                bar_img = generate_progress_bar_image(bar_val)
+                suffix = f" (Reset: {rst})" if pct is not None else ""
+                print(f"   • {family} ({lbl}): {pct_display}{suffix}")
                 print(f"     | image={bar_img} disabled=true")
             else:
-                bar_txt = get_bar_text(pct)
-                print(f"   • {family} ({lbl}): [{bar_txt}] {pct}% remaining (Reset: {rst})")
+                bar_txt = get_bar_text(bar_val)
+                suffix = f" (Reset: {rst})" if pct is not None else ""
+                print(f"   • {family} ({lbl}): [{bar_txt}] {pct_display}{suffix}")
                 
     if ag['error']: 
         print(f"     {ag['error']}")

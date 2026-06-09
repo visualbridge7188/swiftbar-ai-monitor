@@ -1,5 +1,9 @@
 # 🚀 SwiftBar AI Status Monitor
 
+[English](README.md) | [한국어](README_KR.md)
+
+---
+
 A lightweight, native macOS menu bar plugin for [SwiftBar](https://github.com/swiftbar/SwiftBar) that monitors token usage, rate limits, and reset times for **Codex**, **Antigravity**, and **Z AI**.
 
 ---

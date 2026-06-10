@@ -151,25 +151,23 @@ def get_codex_data():
         reset_p_ts = primary.get("resets_at", 0)
         reset_s_ts = secondary.get("resets_at", 0)
         
-        # Check if each limit's data has expired (reset time passed)
+        # Check if each limit's data has expired (reset time passed = fully recharged)
         p_expired = reset_p_ts > 0 and reset_p_ts < now
         s_expired = reset_s_ts > 0 and reset_s_ts < now
         
-        # If BOTH limits expired, data is completely stale
-        if p_expired and s_expired:
-            data_age_h = (now - os.path.getmtime(source_file)) / 3600
-            raise Exception(f"Data expired {data_age_h:.0f}h ago")
+        # If BOTH limits expired, both are recharged to 100%
+        # (data is old but the limits have reset)
         
-        # Calculate remaining for non-expired limits
+        # If expired → limit has reset → show as 100% (recharged)
         if p_expired:
-            remaining_p = -1  # Unknown after reset
+            remaining_p = 100.0
             reset_p_seconds = 0
         else:
             remaining_p = max(0.0, 100.0 - primary.get("used_percent", 0.0))
             reset_p_seconds = max(0, int(reset_p_ts - now))
             
         if s_expired:
-            remaining_s = -1  # Unknown after reset
+            remaining_s = 100.0
             reset_s_seconds = 0
         else:
             remaining_s = max(0.0, 100.0 - secondary.get("used_percent", 0.0))
@@ -197,14 +195,14 @@ def get_codex_data():
             data_age_h = (now - os.path.getmtime(source_file)) / 3600
             error_parts.append(f"Updated {data_age_h:.0f}h ago")
         if p_expired:
-            error_parts.append("5h: need new session")
+            error_parts.append("5h: recharged (est.)")
         error_msg = f"({', '.join(error_parts)})" if error_parts else None
         
         return {
             "percent_5h": int(remaining_p) if remaining_p >= 0 else -1,
             "percent_7d": int(remaining_s) if remaining_s >= 0 else -1,
-            "reset_5h": format_time(reset_p_seconds) if not p_expired else "Reset",
-            "reset_7d": format_time(reset_s_seconds) if not s_expired else "Reset",
+            "reset_5h": format_time(reset_p_seconds) if not p_expired else "≈5h (recharged)",
+            "reset_7d": format_time(reset_s_seconds) if not s_expired else "≈7d (recharged)",
             "expected_7d": expected_7d,
             "alert": alert,
             "error": error_msg,

@@ -1,6 +1,6 @@
 #!/opt/homebrew/bin/python3
 # <bitbar.title>AI Tools Total Monitor</bitbar.title>
-# <bitbar.version>v1.5</bitbar.version>
+# <bitbar.version>v1.6</bitbar.version>
 # <bitbar.author>User</bitbar.author>
 # <bitbar.desc>Monitors Codex, Antigravity, and Z AI tokens natively</bitbar.desc>
 
@@ -148,34 +148,63 @@ def get_codex_data():
         primary = rate_limits["primary"]
         secondary = rate_limits["secondary"]
         
-        remaining_p = max(0.0, 100.0 - primary.get("used_percent", 0.0))
-        remaining_s = max(0.0, 100.0 - secondary.get("used_percent", 0.0))
+        reset_p_ts = primary.get("resets_at", 0)
+        reset_s_ts = secondary.get("resets_at", 0)
         
-        reset_p = max(0, int(primary.get("resets_at", 0) - now))
-        reset_s = max(0, int(secondary.get("resets_at", 0) - now))
+        # Check if each limit's data has expired (reset time passed)
+        p_expired = reset_p_ts > 0 and reset_p_ts < now
+        s_expired = reset_s_ts > 0 and reset_s_ts < now
         
-        # Calculate expected remaining for 7-day pacing (D = 7 days = 604800 seconds)
-        resets_at_s = secondary.get("resets_at", 0)
-        duration_s = 604800
-        time_until_reset_s = resets_at_s - now
-        expected_7d = None
-        if 0 < time_until_reset_s <= duration_s:
-            elapsed = duration_s - time_until_reset_s
-            expected_used = (elapsed / duration_s) * 100.0
-            expected_7d = max(0.0, min(100.0, 100.0 - expected_used))
+        # If BOTH limits expired, data is completely stale
+        if p_expired and s_expired:
+            data_age_h = (now - os.path.getmtime(source_file)) / 3600
+            raise Exception(f"Data expired {data_age_h:.0f}h ago")
+        
+        # Calculate remaining for non-expired limits
+        if p_expired:
+            remaining_p = -1  # Unknown after reset
+            reset_p_seconds = 0
+        else:
+            remaining_p = max(0.0, 100.0 - primary.get("used_percent", 0.0))
+            reset_p_seconds = max(0, int(reset_p_ts - now))
             
-        alert = (remaining_p < 10) or (remaining_s < 10)
+        if s_expired:
+            remaining_s = -1  # Unknown after reset
+            reset_s_seconds = 0
+        else:
+            remaining_s = max(0.0, 100.0 - secondary.get("used_percent", 0.0))
+            reset_s_seconds = max(0, int(reset_s_ts - now))
+        
+        # Calculate expected remaining for 7-day pacing (only if secondary is valid)
+        expected_7d = None
+        if not s_expired:
+            duration_s = 604800
+            time_until_reset_s = reset_s_ts - now
+            if 0 < time_until_reset_s <= duration_s:
+                elapsed = duration_s - time_until_reset_s
+                expected_used = (elapsed / duration_s) * 100.0
+                expected_7d = max(0.0, min(100.0, 100.0 - expected_used))
+            
+        alert = (remaining_p >= 0 and remaining_p < 10) or (remaining_s >= 0 and remaining_s < 10)
 
         # Determine if data is stale (source file is not the newest)
         newest_file = files[0]
         is_stale = (source_file != newest_file)
-        error_msg = "(Stale Data)" if is_stale else None
+        
+        # Build informative error message
+        error_parts = []
+        if is_stale:
+            data_age_h = (now - os.path.getmtime(source_file)) / 3600
+            error_parts.append(f"Updated {data_age_h:.0f}h ago")
+        if p_expired:
+            error_parts.append("5h: need new session")
+        error_msg = f"({', '.join(error_parts)})" if error_parts else None
         
         return {
-            "percent_5h": int(remaining_p),
-            "percent_7d": int(remaining_s),
-            "reset_5h": format_time(reset_p),
-            "reset_7d": format_time(reset_s),
+            "percent_5h": int(remaining_p) if remaining_p >= 0 else -1,
+            "percent_7d": int(remaining_s) if remaining_s >= 0 else -1,
+            "reset_5h": format_time(reset_p_seconds) if not p_expired else "Reset",
+            "reset_7d": format_time(reset_s_seconds) if not s_expired else "Reset",
             "expected_7d": expected_7d,
             "alert": alert,
             "error": error_msg,
@@ -547,25 +576,33 @@ def render_ui(codex, ag, zai):
     print("---")
     
     # Dropdown Details
-    if codex['mocked'] and codex['percent_5h'] < 0:
+    if codex['mocked'] and codex['percent_5h'] < 0 and codex['percent_7d'] < 0:
         # No session data at all - show minimal status
         print("🤖 Codex Status:")
         print(f"   • No session data available")
-    elif HAS_PIL:
-        bar_cx_5h = generate_progress_bar_image(codex['percent_5h'])
-        bar_cx_7d = generate_progress_bar_image(codex['percent_7d'], codex.get('expected_7d'))
-        
-        print("🤖 Codex Status:")
-        print(f"   • 5-Hour Limit: {codex['percent_5h']}% remaining (Reset: {codex['reset_5h']})")
-        print(f"     | image={bar_cx_5h} disabled=true")
-        print(f"   • 7-Day Limit : {codex['percent_7d']}% remaining (Reset: {codex['reset_7d']})")
-        print(f"     | image={bar_cx_7d} disabled=true")
     else:
-        bar_5h = get_bar_text(max(0, codex['percent_5h']))
-        bar_7d = get_bar_text(max(0, codex['percent_7d']))
         print("🤖 Codex Status:")
-        print(f"   • 5-Hour Limit: [{bar_5h}] {codex['percent_5h']}% remaining (Reset: {codex['reset_5h']})")
-        print(f"   • 7-Day Limit : [{bar_7d}] {codex['percent_7d']}% remaining (Reset: {codex['reset_7d']})")
+        # 5-Hour Limit
+        p5h = codex['percent_5h']
+        if p5h >= 0:
+            bar_cx_5h = generate_progress_bar_image(p5h) if HAS_PIL else ""
+            txt_5h = f"   • 5-Hour Limit: {p5h}% remaining (Reset: {codex['reset_5h']})"
+            print(txt_5h)
+            if HAS_PIL:
+                print(f"     | image={bar_cx_5h} disabled=true")
+        else:
+            print(f"   • 5-Hour Limit: ⏳ Reset — need new session | color=orange")
+        
+        # 7-Day Limit
+        p7d = codex['percent_7d']
+        if p7d >= 0:
+            bar_cx_7d = generate_progress_bar_image(p7d, codex.get('expected_7d')) if HAS_PIL else ""
+            txt_7d = f"   • 7-Day Limit : {p7d}% remaining (Reset: {codex['reset_7d']})"
+            print(txt_7d)
+            if HAS_PIL:
+                print(f"     | image={bar_cx_7d} disabled=true")
+        else:
+            print(f"   • 7-Day Limit : ⏳ Reset — need new session | color=orange")
         
     if codex['error']: 
         print(f"     {codex['error']}")

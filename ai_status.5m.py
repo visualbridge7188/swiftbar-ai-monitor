@@ -563,14 +563,29 @@ def get_bar_text(percentage):
 def render_ui(codex, ag, zai):
     any_alert = codex['alert'] or ag['alert'] or zai['alert']
     
-    # Print the menu bar title line with a single space and sfimage sparkles icon
-    # A single space before the pipe ensures SwiftBar renders the item correctly,
-    # but keeps it visually clean as an icon-only display.
-    title_line = " | sfimage=sparkles"
+    # Menu bar title: show key percentages as text
+    cx5 = codex['percent_5h']
+    cx7 = codex['percent_7d']
+    
+    # Get Antigravity lowest model %
+    ag_models = ag.get("models", {})
+    ag_pcts = [m["percent"] for m in ag_models.values() if m and m.get("percent") is not None]
+    ag_min = min(ag_pcts) if ag_pcts else -1
+    
+    z_mcp = zai['percent_mcp']
+    
+    # Build title: C5h/C7d/Amin/Z
+    cx5_str = f"{cx5}%" if cx5 >= 0 else "?"
+    cx7_str = f"{cx7}%" if cx7 >= 0 else "?"
+    ag_str = f"{ag_min}%" if ag_min >= 0 else "?"
+    z_str = f"{z_mcp}%"
+    
+    title = f"🤖{cx5_str}/{cx7_str} 🚀{ag_str} ⚡{z_str}"
+    
     if any_alert:
-        title_line += " sfcolor=red"
+        title += " | sfcolor=red"
         
-    print(title_line)
+    print(title)
     print("---")
     
     # Dropdown Details

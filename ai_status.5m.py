@@ -563,27 +563,10 @@ def get_bar_text(percentage):
 def render_ui(codex, ag, zai):
     any_alert = codex['alert'] or ag['alert'] or zai['alert']
     
-    # Menu bar title: show key percentages as text
-    cx5 = codex['percent_5h']
-    cx7 = codex['percent_7d']
-    
-    # Get Antigravity lowest model %
-    ag_models = ag.get("models", {})
-    ag_pcts = [m["percent"] for m in ag_models.values() if m and m.get("percent") is not None]
-    ag_min = min(ag_pcts) if ag_pcts else -1
-    
-    z_mcp = zai['percent_mcp']
-    
-    # Build title: C5h/C7d/Amin/Z
-    cx5_str = f"{cx5}%" if cx5 >= 0 else "?"
-    cx7_str = f"{cx7}%" if cx7 >= 0 else "?"
-    ag_str = f"{ag_min}%" if ag_min >= 0 else "?"
-    z_str = f"{z_mcp}%"
-    
-    title = f"🤖{cx5_str}/{cx7_str} 🚀{ag_str} ⚡{z_str}"
-    
+    # Menu bar: icon only (click to expand details)
+    title = " | sfimage=sparkles"
     if any_alert:
-        title += " | sfcolor=red"
+        title += " sfcolor=red"
         
     print(title)
     print("---")
@@ -696,7 +679,11 @@ def render_ui(codex, ag, zai):
     print("🔄 Force Refresh Data | refresh=true")
 
 if __name__ == "__main__":
+    # Prefer environment variable over config file
     config = load_config()
+    env_key = os.environ.get("Z_AI_API_KEY", "")
+    if env_key and env_key != "YOUR_API_KEY_HERE":
+        config["Z_AI_API_KEY"] = env_key
     
     codex_data = get_codex_data()
     ag_data = get_antigravity_data()
